@@ -12,9 +12,11 @@ export const getUserReport = async (req, res) => {
 
 
 
+
 export const getAggregatedReport = async (req, res) => {
   const { userId } = req.params;
   const { range } = req.query;
+  const LAG_THRESHOLD = 300; // 5 minutes
 
   let startDate = new Date();
   if (range === 'today') startDate.setHours(0, 0, 0, 0);
@@ -24,41 +26,72 @@ export const getAggregatedReport = async (req, res) => {
   try {
     const sessions = await Session.find({
       user: new mongoose.Types.ObjectId(userId),
-      createdAt: { $gte: startDate }
-    });
+      loginTime: { $gte: startDate }
+    }).sort({ loginTime: 1 });
 
-    let totalActive = 0;
-    let totalIdle = 0;
+    if (!sessions.length) {
+      return res.json({ summary: { totalActive: 0, totalIdle: 0, sessionCount: 0 }, presentDays: 0 });
+    }
+
     const presentDays = new Set();
+    const intervals = [];
+    let totalIdle = 0;
 
     sessions.forEach(session => {
-      const dateKey = new Date(session.loginTime || session.createdAt).toISOString().split("T")[0];
+      const dateKey = new Date(session.loginTime).toISOString().split("T")[0];
       presentDays.add(dateKey);
 
-      // 1. Calculate Wall-Clock Time (Start to End)
-      const start = new Date(session.loginTime || session.createdAt);
-      const end = session.logoutTime ? new Date(session.logoutTime) : new Date();
-      const wallClockDuration = Math.max(0, Math.floor((end - start) / 1000));
-
-      const recordedIdle = session.totalIdleTime || 0;
+      const start = new Date(session.loginTime).getTime();
+      const end = session.logoutTime ? new Date(session.logoutTime).getTime() : Date.now();
       
-      // 2. Reference Logic: Gap goes to Active
-      // Active = WallClock - Idle
-      const calculatedActive = Math.max(0, wallClockDuration - recordedIdle);
+      const wallClockSeconds = (end - start) / 1000;
+      const recordedActive = session.totalActiveTime || 0;
+      const recordedIdle = session.totalIdleTime || 0;
+      const gapTime = wallClockSeconds - (recordedActive + recordedIdle);
 
-      totalActive += calculatedActive;
+      // FAIR CALCULATION:
+      // If the session has a massive gap (crash), we only trust the recorded active time.
+      // If the gap is small (lag), we use the wall-clock time.
+      if (gapTime > 0 && gapTime < LAG_THRESHOLD) {
+        intervals.push({ start, end });
+      } else {
+        // For crashed/large gap sessions, we create a "virtual" interval 
+        // that only lasts for the duration of the recorded active + idle time
+        const virtualEnd = start + (recordedActive + recordedIdle) * 1000;
+        intervals.push({ start, end: virtualEnd });
+      }
+
       totalIdle += recordedIdle;
     });
 
-    // 3. REMOVED Activity.aggregate
-    // Because your Session logic (wall-clock) already accounts for 
-    // the time between login and "now" (new Date()) for live sessions.
-    // Adding activityStats on top causes the double-count.
+    // --- MERGE OVERLAPPING INTERVALS ---
+    // This prevents "Double Counting" if multiple sessions happen at once
+    const merged = [];
+    if (intervals.length > 0) {
+      intervals.sort((a, b) => a.start - b.start);
+      let current = intervals[0];
+
+      for (let i = 1; i < intervals.length; i++) {
+        if (intervals[i].start < current.end) {
+          current.end = Math.max(current.end, intervals[i].end);
+        } else {
+          merged.push(current);
+          current = intervals[i];
+        }
+      }
+      merged.push(current);
+    }
+
+    const totalWallClockMs = merged.reduce((acc, interval) => acc + (interval.end - interval.start), 0);
+    const totalWallClockSeconds = Math.floor(totalWallClockMs / 1000);
+
+    // Active time is the merged connection time minus the idle time
+    const finalActive = Math.max(0, totalWallClockSeconds - totalIdle);
 
     res.json({
       summary: {
-        totalActive,
-        totalIdle,
+        totalActive: finalActive,
+        totalIdle: totalIdle,
         sessionCount: sessions.length
       },
       presentDays: presentDays.size
@@ -145,6 +178,7 @@ export const getLatestActivities = async (req, res) => {
 
 export const getDailySessions = async (req, res) => {
   const { userId } = req.params;
+  const LAG_THRESHOLD = 300; // 5 minutes in seconds
 
   try {
     const sessions = await Session.find({ user: userId }).sort({ loginTime: 1 });
@@ -166,23 +200,24 @@ export const getDailySessions = async (req, res) => {
 
       // 1. Calculate the Wall-Clock Time
       const start = new Date(session.loginTime);
+      // NOTE: If status is 'Crashed', you might want to cap this at a reasonable length
       const end = session.logoutTime ? new Date(session.logoutTime) : new Date();
       const wallClockDuration = Math.floor((end - start) / 1000);
 
-      // 2. The "Fairness" Calculation
-      // We take the recorded active time and the recorded idle time
       const recordedActive = session.totalActiveTime || 0;
       const recordedIdle = session.totalIdleTime || 0;
       
-      // 3. Find the "Unaccounted Time" (The Gaps)
+      // 2. Identify the Gap
       const gapTime = wallClockDuration - (recordedActive + recordedIdle);
 
-      // 4. LOGIC: If the gap is small relative to the session, it's technical lag.
-      // We add the gaps to Active time to be fair to the user.
-      if (gapTime > 0) {
+      // 3. LOGIC: Only count small gaps as "Technical Lag" (Active)
+      // If the gap is large (>= 300s), it's not lag; it's a disconnect or crash.
+      // We do NOT add this to active time.
+      if (gapTime > 0 && gapTime < LAG_THRESHOLD) {
         sessionsByDate[dateKey].totalActiveSeconds += (recordedActive + gapTime);
         sessionsByDate[dateKey].totalIdleSeconds += recordedIdle;
       } else {
+        // Just add the actual recorded values, ignoring the massive gap
         sessionsByDate[dateKey].totalActiveSeconds += recordedActive;
         sessionsByDate[dateKey].totalIdleSeconds += recordedIdle;
       }

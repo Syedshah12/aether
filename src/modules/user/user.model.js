@@ -8,6 +8,12 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: ["admin", "user"], default: "user" },
     isOnline: { type: Boolean, default: false },
     lastSeen: Date,
+assignedAdmin: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User',
+    default: null // Initially, no one owns the user
+  },
+
     currentStatus: {
       type: String,
       enum: [

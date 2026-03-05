@@ -74,7 +74,15 @@ export const initSocket = (server) => {
 
   io.on("connection", (socket) => {
     // --- SCREENSHOT LOGIC (MOVE OUTSIDE registerUser) ---
-    
+    // Inside io.on("connection", (socket) => { ...
+
+// 3. Admin sends a priority message to a user
+socket.on("adminSendMessage", ({ targetUserId, message }) => {
+  io.to(targetUserId).emit("RECEIVE_PRIORITY_MESSAGE", { 
+    message,
+    timestamp: new Date() 
+  });
+});
     // 1. Admin sends the command
     socket.on("adminTriggerScreenshot", (targetUserId) => {
       // Direct the command to the user's specific room

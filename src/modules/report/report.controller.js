@@ -11,8 +11,7 @@ export const getUserReport = async (req, res) => {
 };
 
 
-// modules/report/report.controller.js
-// modules/report/report.controller.js
+
 export const getAggregatedReport = async (req, res) => {
   const { userId } = req.params;
   const { range } = req.query;
@@ -23,62 +22,48 @@ export const getAggregatedReport = async (req, res) => {
   else if (range === 'month') startDate.setMonth(startDate.getMonth() - 1);
 
   try {
-    // 1. Get Session Stats (for finished sessions)
-    const sessionStats = await Session.aggregate([
-      { $match: { user: new mongoose.Types.ObjectId(userId), createdAt: { $gte: startDate } } },
-      {
-        $group: {
-          _id: null,
-          totalActive: { $sum: "$totalActiveTime" },
-          totalIdle: { $sum: "$totalIdleTime" },
-          sessionCount: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // 2. Get Activity Stats (for LIVE/UNFINISHED sessions)
-    // This counts the 5-second pulses you send every interval
-    const activityStats = await Activity.aggregate([
-      { $match: { user: new mongoose.Types.ObjectId(userId), createdAt: { $gte: startDate } } },
-      {
-        $group: {
-          _id: "$status", // Group by 'Active' or 'Idle'
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // Convert Activity counts to seconds (assuming 5-second intervals)
-    let liveActive = 0;
-    let liveIdle = 0;
-    activityStats.forEach(stat => {
-      if (stat._id === 'Active') liveActive = stat.count * 5;
-      if (stat._id === 'Idle') liveIdle = stat.count * 5;
+    const sessions = await Session.find({
+      user: new mongoose.Types.ObjectId(userId),
+      createdAt: { $gte: startDate }
     });
 
-    const summary = sessionStats[0] || { totalActive: 0, totalIdle: 0, sessionCount: 0 };
-const attendance = await Session.aggregate([
-  { 
-    $match: { 
-      user: new mongoose.Types.ObjectId(userId),
-      createdAt: { $gte: startDate } 
-    } 
-  },
-  {
-    $group: {
-      _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }
-    }
-  }
-]);
+    let totalActive = 0;
+    let totalIdle = 0;
+    const presentDays = new Set();
+
+    sessions.forEach(session => {
+      const dateKey = new Date(session.loginTime || session.createdAt).toISOString().split("T")[0];
+      presentDays.add(dateKey);
+
+      // 1. Calculate Wall-Clock Time (Start to End)
+      const start = new Date(session.loginTime || session.createdAt);
+      const end = session.logoutTime ? new Date(session.logoutTime) : new Date();
+      const wallClockDuration = Math.max(0, Math.floor((end - start) / 1000));
+
+      const recordedIdle = session.totalIdleTime || 0;
+      
+      // 2. Reference Logic: Gap goes to Active
+      // Active = WallClock - Idle
+      const calculatedActive = Math.max(0, wallClockDuration - recordedIdle);
+
+      totalActive += calculatedActive;
+      totalIdle += recordedIdle;
+    });
+
+    // 3. REMOVED Activity.aggregate
+    // Because your Session logic (wall-clock) already accounts for 
+    // the time between login and "now" (new Date()) for live sessions.
+    // Adding activityStats on top causes the double-count.
+
     res.json({
       summary: {
-  // Adds finished session time + current live pulse time
-  totalActive: summary.totalActive + liveActive, 
-  totalIdle: summary.totalIdle + liveIdle,
-  sessionCount: summary.sessionCount
-},
-     presentDays: attendance.length
+        totalActive,
+        totalIdle,
+        sessionCount: sessions.length
+      },
+      presentDays: presentDays.size
     });
+
   } catch (error) {
     res.status(500).json({ message: "Aggregation failed", error: error.message });
   }

@@ -1,20 +1,52 @@
 import Session from "./session.model.js";
 import User from "../user/user.model.js";
 
+// export const startSession = async (req, res) => {
+//   const session = await Session.create({
+//     user: req.user.id,
+//     loginTime: new Date()
+//   });
+
+//   await User.findByIdAndUpdate(req.user.id, {
+//     isOnline: true,
+//     currentStatus: "Active"
+//   });
+
+//   res.json(session);
+// };
 export const startSession = async (req, res) => {
+  const userId = req.user.id;
+
+  // 1. Terminate any existing active sessions for this user
+  // We look for sessions where the end time hasn't been set yet
+  await Session.updateMany(
+    { 
+      user: userId, 
+      endTime: { $exists: false } // Assuming your end field is 'endTime'
+    },
+    { 
+      $set: { 
+        endTime: new Date(), 
+        reason: "Force closed: concurrent login detected" 
+      } 
+    }
+  );
+
+  // 2. Create the new session
   const session = await Session.create({
-    user: req.user.id,
+    user: userId,
     loginTime: new Date()
+    // Note: The 'start' time is effectively loginTime here
   });
 
-  await User.findByIdAndUpdate(req.user.id, {
+  // 3. Update the User's global status
+  await User.findByIdAndUpdate(userId, {
     isOnline: true,
     currentStatus: "Active"
   });
 
   res.json(session);
 };
-
 export const endSession = async (req, res) => {
   const { sessionId, totalActiveTime, totalIdleTime, reason } = req.body;
 

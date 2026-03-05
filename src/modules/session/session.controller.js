@@ -14,37 +14,32 @@ import User from "../user/user.model.js";
 
 //   res.json(session);
 // };
+// Add your socket instance to this file (usually passed from your server.js or via req.io)
 export const startSession = async (req, res) => {
   const userId = req.user.id;
+  const io = req.app.get('socketio'); // Or however you access your IO instance
 
-  // 1. Terminate any existing active sessions for this user
-  // We look for sessions where the end time hasn't been set yet
+  // 1. Send the "Kill Signal" via Socket BEFORE updating the DB
+  // We send it to a room named after the User ID
+  if (io) {
+    io.to(userId.toString()).emit("FORCE_LOGOUT", { 
+      message: "Concurrent login detected." 
+    });
+  }
+
+  // 2. Terminate database records
   await Session.updateMany(
-    { 
-      user: userId, 
-      endTime: { $exists: false } // Assuming your end field is 'endTime'
-    },
-    { 
-      $set: { 
-        endTime: new Date(), 
-        reason: "Force closed: concurrent login detected" 
-      } 
-    }
+    { user: userId, endTime: { $exists: false } },
+    { $set: { endTime: new Date(), reason: "Force closed: concurrent login" } }
   );
 
-  // 2. Create the new session
+  // 3. Create new session
   const session = await Session.create({
     user: userId,
     loginTime: new Date()
-    // Note: The 'start' time is effectively loginTime here
   });
 
-  // 3. Update the User's global status
-  await User.findByIdAndUpdate(userId, {
-    isOnline: true,
-    currentStatus: "Active"
-  });
-
+  await User.findByIdAndUpdate(userId, { isOnline: true, currentStatus: "Active" });
   res.json(session);
 };
 export const endSession = async (req, res) => {

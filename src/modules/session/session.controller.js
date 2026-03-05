@@ -1,6 +1,6 @@
 import Session from "./session.model.js";
 import User from "../user/user.model.js";
-
+import { getIO } from "../../config/socket.js"; // Import your getIO helper
 // export const startSession = async (req, res) => {
 //   const session = await Session.create({
 //     user: req.user.id,
@@ -17,14 +17,15 @@ import User from "../user/user.model.js";
 // Add your socket instance to this file (usually passed from your server.js or via req.io)
 export const startSession = async (req, res) => {
   const userId = req.user.id;
-  const io = req.app.get('socketio'); // Or however you access your IO instance
+  const io = getIO(); // Use your helper function
 
-  // 1. Send the "Kill Signal" via Socket BEFORE updating the DB
-  // We send it to a room named after the User ID
   if (io) {
+    // 1. Emit to the room named after the userId
+    // Ensure this is a string to match the frontend registration
     io.to(userId.toString()).emit("FORCE_LOGOUT", { 
-      message: "Concurrent login detected." 
+      message: "Concurrent login detected. Current node terminating." 
     });
+    console.log(`[SECURITY] Kill signal sent to user room: ${userId}`);
   }
 
   // 2. Terminate database records
@@ -33,7 +34,7 @@ export const startSession = async (req, res) => {
     { $set: { endTime: new Date(), reason: "Force closed: concurrent login" } }
   );
 
-  // 3. Create new session
+  // 3. Create the new session
   const session = await Session.create({
     user: userId,
     loginTime: new Date()
